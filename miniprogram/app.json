@@ -1,0 +1,14 @@
+{
+  "pages": [
+    "pages/index/index"
+  ],
+  "window": {
+    "navigationBarBackgroundColor": "#03040a",
+    "navigationBarTitleText": "放烟花",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#03040a",
+    "backgroundTextStyle": "dark"
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

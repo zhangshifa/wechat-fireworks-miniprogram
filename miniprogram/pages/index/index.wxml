@@ -1,0 +1,4 @@
+<view class="wrap">
+  <canvas type="2d" id="fw" class="fw" bindtap="onTap" disable-scroll="true"></canvas>
+  <view class="hint">轻触屏幕，放一朵烟花 ✨</view>
+</view>

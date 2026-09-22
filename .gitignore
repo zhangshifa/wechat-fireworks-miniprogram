@@ -1,0 +1,16 @@
+# 微信开发者工具 / 本地临时产物
+login_out*.json
+login_qrcode.jpg
+preview_qrcode.png
+screenshot.jpg
+shot*.jpg
+project.private.config.json
+
+# 依赖
+node_modules/
+miniprogram_npm/
+
+# 系统
+.DS_Store
+Thumbs.db
+*.log
