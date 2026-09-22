@@ -35,4 +35,20 @@
 
 ## 部署（Agent 自动化）
 
-本项目的「导入 → 出预览码」链路可完全由 `wechatide` CLI 驱动，详见仓库 `miniprogram-agent-workflow`。
+本项目的「导入 → 出预览码」链路可完全由 `wechatide` CLI 驱动，详见仓库 `miniprogram-agent-workflow`：
+
+```bash
+python <skill>/scripts/wxide.py import  --project "<abs>/烟花小程序"
+python <skill>/scripts/wxide.py open    --project "<abs>/烟花小程序"
+python <skill>/scripts/wxide.py preview --project "<abs>/烟花小程序" --out preview_qrcode.png
+```
+
+## 生成「烟花背景」二维码海报
+
+`tools/make_qr_poster.py` 把预览码合成到程序绘制的烟花夜空背景上（二维码用**整数倍 NEAREST 放大**，保证边缘锐利、可扫）：
+
+```bash
+python tools/make_qr_poster.py --qr preview_qrcode.png --out fireworks_qr.png
+```
+
+产出 1200×1800 竖版海报：夜空渐变 + 星点 + 11 组彩色烟花爆炸 + 白色圆角卡片承载二维码 + 标题文案。
