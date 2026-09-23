@@ -3,9 +3,14 @@
 // 控制面板可切换轨迹模式(随机/扇形/螺旋/心形)并调角度/力度/重力/炸开大小
 // 「轰出文字」：火箭升空到中心后，粒子汇聚成文字形状
 
+// 调色板对齐 fangyanhua.top（Firework_Simulator 原版 6 色）
 const COLORS = [
-  '#ff4d6d', '#ffd166', '#06d6a0', '#4cc9f0', '#b5179e',
-  '#f72585', '#ff9e00', '#7b2ff7', '#00f5d4', '#fefae0'
+  '#ff0043', // Red
+  '#14fc56', // Green
+  '#1e7fff', // Blue
+  '#e60aff', // Purple
+  '#ffbf36', // Gold
+  '#ffffff'  // White
 ];
 
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -32,6 +37,7 @@ Page({
     this.muted = false;
     this.textCache = {};      // 文字采样缓存
     this.fanPhase = 0;        // 扇形扫射相位
+    this.flashes = [];         // 爆心径向闪光队列
     // 同步面板参数
     this.angleDeg = this.data.angle;
     this.power = this.data.power;
@@ -309,8 +315,7 @@ Page({
       const a = (Math.PI * 2 * i) / count + rand(-0.05, 0.05);
       const s = speed * rand(0.35, 1);
       this.particles.push({
-        x,
-        y,
+        x, y, px: x, py: y,
         vx: Math.cos(a) * s,
         vy: Math.sin(a) * s,
         color: Math.random() < 0.15 ? '#ffffff' : color,
@@ -324,8 +329,7 @@ Page({
       const a = rand(0, Math.PI * 2);
       const s = rand(0.4, 1.2);
       this.particles.push({
-        x,
-        y,
+        x, y, px: x, py: y,
         vx: Math.cos(a) * s,
         vy: Math.sin(a) * s,
         color: '#fff6cc',
@@ -339,6 +343,8 @@ Page({
     if (this.particles.length > MAX) {
       this.particles.splice(0, this.particles.length - MAX);
     }
+    // 爆心白→橙径向闪光（对齐 fangyanhua 的 BurstFlash）
+    this.flashes.push({ x, y, r: Math.max(this.W, this.H) * 0.16, life: 1 });
     // 爆炸「砰 + 噼啪」音效
     this.playBoom();
   },
@@ -454,9 +460,9 @@ Page({
     const W = this.W;
     const H = this.H;
 
-    // 半透明黑覆盖 -> 形成拖尾
+    // 半透明黑覆盖 -> 形成拖尾（纯黑，对齐 fangyanhua 的 trails 层擦除系数）
     ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = 'rgba(3,4,10,0.20)';
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.175)';
     ctx.fillRect(0, 0, W, H);
 
     // 叠加发光
@@ -524,6 +530,7 @@ Page({
     // 更新普通粒子
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const p = this.particles[i];
+      p.px = p.x; p.py = p.y;
       p.x += p.vx;
       p.y += p.vy;
       p.vx *= 0.985;
@@ -535,10 +542,28 @@ Page({
         continue;
       }
       ctx.globalAlpha = Math.max(p.alpha, 0);
-      ctx.fillStyle = p.color;
+      ctx.strokeStyle = p.color;
+      ctx.lineWidth = Math.max(p.size, 1.6);
+      ctx.lineCap = 'round';
       ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.moveTo(p.px, p.py);
+      ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+    }
+
+    // 爆心径向闪光（lighter 层，对齐 fangyanhua 的 BurstFlash）
+    for (let i = this.flashes.length - 1; i >= 0; i--) {
+      const f = this.flashes[i];
+      f.life -= 0.06;
+      if (f.life <= 0) { this.flashes.splice(i, 1); continue; }
+      const rad = f.r * (1.12 - f.life * 0.32);
+      const g = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, rad);
+      g.addColorStop(0.0, 'rgba(255,255,255,' + (f.life * 0.9).toFixed(3) + ')');
+      g.addColorStop(0.125, 'rgba(255,160,20,' + (f.life * 0.25).toFixed(3) + ')');
+      g.addColorStop(0.32, 'rgba(255,140,20,' + (f.life * 0.12).toFixed(3) + ')');
+      g.addColorStop(1, 'rgba(255,120,20,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(f.x - rad, f.y - rad, rad * 2, rad * 2);
     }
 
     // 更新文字粒子：先汇聚成字，定格后渐隐
