@@ -1,600 +1,959 @@
-// 放烟花 —— Canvas 2D 粒子动画 + 真实感烟花音效 + 节日文字 + 可设置轨迹 + 轰出文字
-// 升空火箭(rise) -> 播放「咻」升空声；抵达后爆炸(explode) -> 播放「砰+噼啪」并叠加发光粒子
-// 控制面板可切换轨迹模式(随机/扇形/螺旋/心形)并调角度/力度/重力/炸开大小
-// 「轰出文字」：火箭升空到中心后，粒子汇聚成文字形状
+// 烟花模拟器 —— 一比一复刻 fangyanhua.top（fork 自 NianBroken/Firework_Simulator）
+// 单 canvas 等效双 canvas 物理引擎：用 globalCompositeOperation='lighter' + 半透明黑覆盖形成拖尾。
 
-// 调色板对齐 fangyanhua.top（Firework_Simulator 原版 6 色）
-const COLORS = [
-  '#ff0043', // Red
-  '#14fc56', // Green
-  '#1e7fff', // Blue
-  '#e60aff', // Purple
-  '#ffbf36', // Gold
-  '#ffffff'  // White
-];
+const PI_2 = Math.PI * 2;
+const PI_HALF = Math.PI * 0.5;
+const GRAVITY = 0.9;
 
-const rand = (a, b) => a + Math.random() * (b - a);
-const pick = (arr) => arr[(Math.random() * arr.length) | 0];
+// ===== 调色板（与 fangyanhua 完全一致）=====
+const COLORS = {
+  Red: '#ff0043',
+  Green: '#14fc56',
+  Blue: '#1e7fff',
+  Purple: '#e60aff',
+  Gold: '#ffbf36',
+  White: '#ffffff'
+};
+const COLOR_CODES = Object.values(COLORS);
+const INVISIBLE = '_INVISIBLE_';
+const COLOR_CODES_W_INVIS = [...COLOR_CODES, INVISIBLE];
 
+// ===== 画质 =====
+const QUALITY_LOW = 1, QUALITY_NORMAL = 2, QUALITY_HIGH = 3;
+
+// ===== 照亮天空 =====
+const SKY_LIGHT_NONE = 0, SKY_LIGHT_DIM = 1, SKY_LIGHT_NORMAL = 2;
+
+// ===== 全局状态（对应原版 store.config）=====
+const SHELL_NAMES = ['Random', 'Crackle', 'Crossette', 'Crysanthemum', 'Falling Leaves', 'Floral', 'Ghost', 'Horse Tail', 'Palm', 'Ring', 'Strobe', 'Willow'];
+const SIZE_NAMES = ['3"', '4"', '6"', '8"', '12"', '16"'];
+const SCALE_OPTIONS = [0.5, 0.62, 0.75, 0.9, 1.0, 1.5, 2.0];
+
+let lastColor = null;
+function randomColorSimple() {
+  return COLOR_CODES[(Math.random() * COLOR_CODES.length) | 0];
+}
+function randomColor(options) {
+  const notSame = options && options.notSame;
+  const notColor = options && options.notColor;
+  const limitWhite = options && options.limitWhite;
+  let color = randomColorSimple();
+  if (limitWhite && color === COLORS.White && Math.random() < 0.6) color = randomColorSimple();
+  if (notSame) { while (color === lastColor) color = randomColorSimple(); }
+  else if (notColor) { while (color === notColor) color = randomColorSimple(); }
+  lastColor = color;
+  return color;
+}
+function whiteOrGold() { return Math.random() < 0.5 ? COLORS.Gold : COLORS.White; }
+function makePistilColor(shellColor) {
+  return (shellColor === COLORS.White || shellColor === COLORS.Gold) ? randomColor({ notColor: shellColor }) : whiteOrGold();
+}
+function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+function rand(a, b) { return a + Math.random() * (b - a); }
+function randInt(n) { return (Math.random() * n) | 0; }
+function pointDist(x1, y1, x2, y2) { return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2); }
+function pointAngle(x1, y1, x2, y2) { return Math.atan2(y2 - y1, x2 - x1); }
+
+// ===== 粒子对象池 =====
+function createCollection() {
+  const c = {};
+  COLOR_CODES_W_INVIS.forEach(color => { c[color] = []; });
+  return c;
+}
+
+const Star = {
+  drawWidth: 3,
+  airDrag: 0.98,
+  airDragHeavy: 0.992,
+  active: createCollection(),
+  _pool: [],
+  _new() { return {}; },
+  add(x, y, color, angle, speed, life, speedOffX, speedOffY) {
+    const inst = this._pool.pop() || this._new();
+    inst.visible = true;
+    inst.heavy = false;
+    inst.x = x; inst.y = y;
+    inst.prevX = x; inst.prevY = y;
+    inst.color = color;
+    inst.speedX = Math.sin(angle) * speed + (speedOffX || 0);
+    inst.speedY = Math.cos(angle) * speed + (speedOffY || 0);
+    inst.life = life;
+    inst.fullLife = life;
+    inst.spinAngle = Math.random() * PI_2;
+    inst.spinSpeed = 0.8;
+    inst.spinRadius = 0;
+    inst.sparkFreq = 0;
+    inst.sparkSpeed = 1;
+    inst.sparkTimer = 0;
+    inst.sparkColor = color;
+    inst.sparkLife = 750;
+    inst.sparkLifeVariation = 0.25;
+    inst.strobe = false;
+    inst.secondColor = null;
+    inst.transitionTime = 0;
+    inst.colorChanged = false;
+    inst.onDeath = null;
+    this.active[color].push(inst);
+    return inst;
+  },
+  returnInstance(inst) {
+    inst.onDeath && inst.onDeath(inst);
+    inst.onDeath = null;
+    inst.secondColor = null;
+    inst.transitionTime = 0;
+    inst.colorChanged = false;
+    this._pool.push(inst);
+  }
+};
+
+const Spark = {
+  drawWidth: 0,
+  airDrag: 0.9,
+  active: createCollection(),
+  _pool: [],
+  _new() { return {}; },
+  add(x, y, color, angle, speed, life) {
+    const inst = this._pool.pop() || this._new();
+    inst.x = x; inst.y = y;
+    inst.prevX = x; inst.prevY = y;
+    inst.color = color;
+    inst.speedX = Math.sin(angle) * speed;
+    inst.speedY = Math.cos(angle) * speed;
+    inst.life = life;
+    this.active[color].push(inst);
+    return inst;
+  },
+  returnInstance(inst) { this._pool.push(inst); }
+};
+
+// ===== 爆心闪光 =====
+const BurstFlash = {
+  active: [],
+  _pool: [],
+  add(x, y, radius) {
+    const inst = this._pool.pop() || {};
+    inst.x = x; inst.y = y; inst.radius = radius;
+    inst.life = 1;       // 渐隐系数（1→0）
+    inst.decay = 0.11;   // 每帧衰减
+    this.active.push(inst);
+    return inst;
+  },
+  returnInstance(inst) { inst.life = 1; inst.decay = 0.11; this._pool.push(inst); }
+};
+
+// ===== 各种死亡效果（挂在 star.onDeath）=====
+function createParticleArc(start, arcLength, count, randomness, factory) {
+  const angleDelta = arcLength / count;
+  const end = start + arcLength - angleDelta * 0.5;
+  if (end > start) {
+    for (let a = start; a < end; a += angleDelta) factory(a + Math.random() * angleDelta * randomness);
+  } else {
+    for (let a = start; a > end; a += angleDelta) factory(a + Math.random() * angleDelta * randomness);
+  }
+}
+function createBurst(count, factory, startAngle = 0, arcLength = PI_2) {
+  const R = 0.5 * Math.sqrt(count / Math.PI);
+  const C = 2 * R * Math.PI;
+  const C_HALF = C / 2;
+  for (let i = 0; i <= C_HALF; i++) {
+    const ringAngle = i / C_HALF * PI_HALF;
+    const ringSize = Math.cos(ringAngle);
+    const partsPerFullRing = C * ringSize;
+    const partsPerArc = partsPerFullRing * (arcLength / PI_2);
+    const angleInc = PI_2 / partsPerFullRing;
+    const angleOffset = Math.random() * angleInc + startAngle;
+    const maxRandomAngleOffset = angleInc * 0.33;
+    for (let j = 0; j < partsPerArc; j++) {
+      const randomAngleOffset = Math.random() * maxRandomAngleOffset;
+      const angle = angleInc * j + angleOffset + randomAngleOffset;
+      factory(angle, ringSize);
+    }
+  }
+}
+function crossetteEffect(star) {
+  const startAngle = Math.random() * PI_HALF;
+  createParticleArc(startAngle, PI_2, 4, 0.5, (angle) => {
+    Star.add(star.x, star.y, star.color, angle, Math.random() * 0.6 + 0.75, 600);
+  });
+}
+function floralEffect(star) {
+  const count = 12 + 6 * (state.quality === QUALITY_HIGH ? 3 : state.quality);
+  createBurst(count, (angle, speedMult) => {
+    Star.add(star.x, star.y, star.color, angle, speedMult * 2.4, 1000 + Math.random() * 300, star.speedX, star.speedY);
+  });
+  BurstFlash.add(star.x, star.y, 46);
+  sound.play('burstSmall', 1);
+}
+function fallingLeavesEffect(star) {
+  createBurst(7, (angle, speedMult) => {
+    const ns = Star.add(star.x, star.y, INVISIBLE, angle, speedMult * 2.4, 2400 + Math.random() * 600, star.speedX, star.speedY);
+    ns.sparkColor = COLORS.Gold;
+    ns.sparkFreq = 144 / state.quality;
+    ns.sparkSpeed = 0.28;
+    ns.sparkLife = 750;
+    ns.sparkLifeVariation = 3.2;
+  });
+  BurstFlash.add(star.x, star.y, 46);
+  sound.play('burstSmall', 1);
+}
+function crackleEffect(star) {
+  const count = state.quality === QUALITY_HIGH ? 32 : 16;
+  createParticleArc(0, PI_2, count, 1.8, (angle) => {
+    Spark.add(star.x, star.y, COLORS.Gold, angle, Math.pow(Math.random(), 0.45) * 2.4, 300 + Math.random() * 200);
+  });
+}
+
+// ===== 12 种烟花类型 factory =====
+function crysanthemumShell(size = 1) {
+  const glitter = Math.random() < 0.25;
+  const singleColor = Math.random() < 0.72;
+  const color = singleColor ? randomColor({ limitWhite: true }) : [randomColor(), randomColor({ notSame: true })];
+  const pistil = singleColor && Math.random() < 0.42;
+  const pistilColor = pistil && makePistilColor(color);
+  const secondColor = singleColor && (Math.random() < 0.2 || color === COLORS.White) ? (pistilColor || randomColor({ notColor: color, limitWhite: true })) : null;
+  const streamers = !pistil && color !== COLORS.White && Math.random() < 0.42;
+  let starDensity = glitter ? 1.1 : 1.25;
+  if (state.quality === QUALITY_LOW) starDensity *= 0.8;
+  if (state.quality === QUALITY_HIGH) starDensity = 1.2;
+  return { shellSize: size, spreadSize: 300 + size * 100, starLife: 900 + size * 200, starDensity, color, secondColor, glitter: glitter ? 'light' : '', glitterColor: whiteOrGold(), pistil, pistilColor, streamers };
+}
+function ringShell(size = 1) {
+  const color = randomColor();
+  const pistil = Math.random() < 0.75;
+  return { shellSize: size, ring: true, color, spreadSize: 300 + size * 100, starLife: 900 + size * 200, starCount: 2.2 * PI_2 * (size + 1), pistil, pistilColor: makePistilColor(color), glitter: !pistil ? 'light' : '', glitterColor: color === COLORS.Gold ? COLORS.Gold : COLORS.White, streamers: Math.random() < 0.3 };
+}
+function crossetteShell(size = 1) {
+  const color = randomColor({ limitWhite: true });
+  return { shellSize: size, spreadSize: 300 + size * 100, starLife: 750 + size * 160, starLifeVariation: 0.4, starDensity: 0.85, color, crossette: true, pistil: Math.random() < 0.5, pistilColor: makePistilColor(color) };
+}
+function floralShell(size = 1) {
+  return { shellSize: size, spreadSize: 300 + size * 120, starDensity: 0.12, starLife: 500 + size * 50, starLifeVariation: 0.5, color: Math.random() < 0.65 ? 'random' : (Math.random() < 0.15 ? randomColor() : [randomColor(), randomColor({ notSame: true })]), floral: true };
+}
+function fallingLeavesShell(size = 1) {
+  return { shellSize: size, color: INVISIBLE, spreadSize: 300 + size * 120, starDensity: 0.12, starLife: 500 + size * 50, starLifeVariation: 0.5, glitter: 'medium', glitterColor: COLORS.Gold, fallingLeaves: true };
+}
+function willowShell(size = 1) {
+  return { shellSize: size, spreadSize: 300 + size * 100, starDensity: 0.6, starLife: 3000 + size * 300, glitter: 'willow', glitterColor: COLORS.Gold, color: INVISIBLE };
+}
+function crackleShell(size = 1) {
+  const color = Math.random() < 0.75 ? COLORS.Gold : randomColor();
+  return { shellSize: size, spreadSize: 380 + size * 75, starDensity: state.quality === QUALITY_LOW ? 0.65 : 1, starLife: 600 + size * 100, starLifeVariation: 0.32, glitter: 'light', glitterColor: COLORS.Gold, color, crackle: true, pistil: Math.random() < 0.65, pistilColor: makePistilColor(color) };
+}
+function horsetailShell(size = 1) {
+  const color = randomColor();
+  return { shellSize: size, horsetail: true, color, spreadSize: 250 + size * 38, starDensity: 0.9, starLife: 2500 + size * 300, glitter: 'medium', glitterColor: Math.random() < 0.5 ? whiteOrGold() : color, strobe: color === COLORS.White };
+}
+function ghostShell(size = 1) {
+  const shell = crysanthemumShell(size);
+  shell.starLife *= 1.5;
+  const ghostColor = randomColor({ notColor: COLORS.White });
+  shell.streamers = true;
+  const pistil = Math.random() < 0.42;
+  shell.pistil = pistil;
+  shell.pistilColor = pistil && makePistilColor(ghostColor);
+  shell.color = INVISIBLE;
+  shell.secondColor = ghostColor;
+  shell.glitter = '';
+  return shell;
+}
+function strobeShell(size = 1) {
+  const color = randomColor({ limitWhite: true });
+  return { shellSize: size, spreadSize: 280 + size * 92, starLife: 1100 + size * 200, starLifeVariation: 0.40, starDensity: 1.1, color, glitter: 'light', glitterColor: COLORS.White, strobe: true, strobeColor: Math.random() < 0.5 ? COLORS.White : null, pistil: Math.random() < 0.5, pistilColor: makePistilColor(color) };
+}
+function palmShell(size = 1) {
+  const color = randomColor();
+  const thick = Math.random() < 0.5;
+  return { shellSize: size, color, spreadSize: 250 + size * 75, starDensity: thick ? 0.15 : 0.4, starLife: 1800 + size * 200, glitter: thick ? 'thick' : 'heavy' };
+}
+
+const shellTypes = {
+  'Random': null, 'Crackle': crackleShell, 'Crossette': crossetteShell, 'Crysanthemum': crysanthemumShell,
+  'Falling Leaves': fallingLeavesShell, 'Floral': floralShell, 'Ghost': ghostShell, 'Horse Tail': horsetailShell,
+  'Palm': palmShell, 'Ring': ringShell, 'Strobe': strobeShell, 'Willow': willowShell
+};
+function randomShellName() {
+  return Math.random() < 0.5 ? 'Crysanthemum' : SHELL_NAMES[(Math.random() * (SHELL_NAMES.length - 1) + 1) | 0];
+}
+function randomFastShell() {
+  const blacklist = ['Falling Leaves', 'Floral', 'Willow'];
+  let name = state.config.shell === 'Random' ? randomShellName() : state.config.shell;
+  if (state.config.shell === 'Random') {
+    while (blacklist.includes(name)) name = randomShellName();
+  }
+  return shellTypes[name];
+}
+function makeShell(name, size) {
+  if (name === 'Random') {
+    const fn = Math.random() < 0.5 ? crysanthemumShell : randomFastShell();
+    return new Shell(fn(size));
+  }
+  return new Shell(shellTypes[name](size));
+}
+
+// ===== Shell 类（火箭升空 + 爆炸）=====
+class Shell {
+  constructor(options) {
+    Object.assign(this, options);
+    this.starLifeVariation = options.starLifeVariation || 0.125;
+    this.color = options.color || randomColor();
+    this.glitterColor = options.glitterColor || this.color;
+    if (!this.starCount) {
+      const density = options.starDensity || 1;
+      const scaledSize = this.spreadSize / 54;
+      this.starCount = Math.max(6, scaledSize * scaledSize * density);
+    }
+  }
+  launch(position, launchHeight) {
+    const width = state.stageW, height = state.stageH;
+    const hpad = 60, vpad = 50;
+    const minHeightPercent = 0.45;
+    const minHeight = height - height * minHeightPercent;
+    const launchX = position * (width - hpad * 2) + hpad;
+    const launchY = height;
+    const burstY = minHeight - (launchHeight * (minHeight - vpad));
+    const launchDistance = launchY - burstY;
+    // 火箭上升：在寿命内精确升到 burstY（直线模型，不受重力/阻力影响），避免时间单位错配飞出屏幕
+    const riseMs = 1000 + launchDistance * 0.2;
+    // Star.add 用 angle=PI → speedY = cos(PI)*speed = -speed，故 speed 取正值时向上
+    const riseSpeed = launchDistance / (riseMs / 16.67);
+    const comet = this.comet = Star.add(
+      launchX, launchY,
+      (typeof this.color === 'string' && this.color !== 'random') ? this.color : COLORS.White,
+      Math.PI, riseSpeed, riseMs
+    );
+    comet.noGravity = true;
+    comet.heavy = true;
+    comet.pureRise = true;
+    comet.spinRadius = rand(0.32, 0.85);
+    comet.sparkFreq = 32 / state.quality;
+    if (state.quality === QUALITY_HIGH) comet.sparkFreq = 8;
+    comet.sparkLife = 320;
+    comet.sparkLifeVariation = 3;
+    if (this.glitter === 'willow' || this.fallingLeaves) {
+      comet.sparkFreq = 20 / state.quality;
+      comet.sparkSpeed = 0.5;
+      comet.sparkLife = 500;
+    }
+    if (this.color === INVISIBLE) comet.sparkColor = COLORS.Gold;
+    if (Math.random() > 0.4 && !this.horsetail) {
+      comet.secondColor = INVISIBLE;
+      comet.transitionTime = Math.pow(Math.random(), 1.5) * 700 + 500;
+    }
+    comet.onDeath = (c) => this.burst(c.x, c.y);
+    sound.play('lift', 1);
+  }
+  burst(x, y) {
+    const speed = this.spreadSize / 96;
+    let color, onDeath, sparkFreq, sparkSpeed, sparkLife;
+    let sparkLifeVariation = 0.25;
+    let playedDeathSound = false;
+    if (this.crossette) onDeath = (star) => {
+      if (!playedDeathSound) { sound.play('crackleSmall', 1); playedDeathSound = true; }
+      crossetteEffect(star);
+    };
+    if (this.crackle) onDeath = (star) => {
+      if (!playedDeathSound) { sound.play('crackle', 1); playedDeathSound = true; }
+      crackleEffect(star);
+    };
+    if (this.floral) onDeath = floralEffect;
+    if (this.fallingLeaves) onDeath = fallingLeavesEffect;
+
+    if (this.glitter === 'light') { sparkFreq = 400; sparkSpeed = 0.3; sparkLife = 300; sparkLifeVariation = 2; }
+    else if (this.glitter === 'medium') { sparkFreq = 200; sparkSpeed = 0.44; sparkLife = 700; sparkLifeVariation = 2; }
+    else if (this.glitter === 'heavy') { sparkFreq = 80; sparkSpeed = 0.8; sparkLife = 1400; sparkLifeVariation = 2; }
+    else if (this.glitter === 'thick') { sparkFreq = 16; sparkSpeed = state.quality === QUALITY_HIGH ? 1.65 : 1.5; sparkLife = 1400; sparkLifeVariation = 3; }
+    else if (this.glitter === 'streamer') { sparkFreq = 32; sparkSpeed = 1.05; sparkLife = 620; sparkLifeVariation = 2; }
+    else if (this.glitter === 'willow') { sparkFreq = 120; sparkSpeed = 0.34; sparkLife = 1400; sparkLifeVariation = 3.8; }
+    sparkFreq = sparkFreq / state.quality;
+
+    let firstStar = true;
+    const starFactory = (angle, speedMult) => {
+      const standardInitialSpeed = this.spreadSize / 1800;
+      const star = Star.add(
+        x, y, color || randomColor(),
+        angle, speedMult * speed,
+        this.starLife + Math.random() * this.starLife * this.starLifeVariation,
+        this.horsetail ? (this.comet && this.comet.speedX) : 0,
+        this.horsetail ? (this.comet && this.comet.speedY) : -standardInitialSpeed
+      );
+      if (this.secondColor) {
+        star.transitionTime = this.starLife * (Math.random() * 0.05 + 0.32);
+        star.secondColor = this.secondColor;
+      }
+      if (this.strobe) {
+        star.transitionTime = this.starLife * (Math.random() * 0.08 + 0.46);
+        star.strobe = true;
+        star.strobeFreq = Math.random() * 20 + 40;
+        if (this.strobeColor) star.secondColor = this.strobeColor;
+      }
+      star.onDeath = onDeath;
+      if (this.glitter) {
+        star.sparkFreq = sparkFreq;
+        star.sparkSpeed = sparkSpeed;
+        star.sparkLife = sparkLife;
+        star.sparkLifeVariation = sparkLifeVariation;
+        star.sparkColor = this.glitterColor;
+        star.sparkTimer = Math.random() * star.sparkFreq;
+      }
+    };
+
+    if (typeof this.color === 'string') {
+      if (this.color === 'random') color = null;
+      else color = this.color;
+      if (this.ring) {
+        const ringStartAngle = Math.random() * Math.PI;
+        const ringSquash = Math.pow(Math.random(), 2) * 0.85 + 0.15;
+        createParticleArc(0, PI_2, this.starCount, 0, angle => {
+          const initSpeedX = Math.sin(angle) * speed * ringSquash;
+          const initSpeedY = Math.cos(angle) * speed;
+          const newSpeed = pointDist(0, 0, initSpeedX, initSpeedY);
+          const newAngle = pointAngle(0, 0, initSpeedX, initSpeedY) + ringStartAngle;
+          const star = Star.add(x, y, color, newAngle, newSpeed, this.starLife + Math.random() * this.starLife * this.starLifeVariation);
+          if (this.glitter) {
+            star.sparkFreq = sparkFreq; star.sparkSpeed = sparkSpeed;
+            star.sparkLife = sparkLife; star.sparkLifeVariation = sparkLifeVariation;
+            star.sparkColor = this.glitterColor; star.sparkTimer = Math.random() * star.sparkFreq;
+          }
+        });
+      } else {
+        createBurst(this.starCount, starFactory);
+      }
+    } else if (Array.isArray(this.color)) {
+      if (Math.random() < 0.5) {
+        const start = Math.random() * Math.PI, start2 = start + Math.PI, arc = Math.PI;
+        color = this.color[0];
+        createBurst(this.starCount, starFactory, start, arc);
+        color = this.color[1];
+        createBurst(this.starCount, starFactory, start2, arc);
+      } else {
+        color = this.color[0]; createBurst(this.starCount / 2, starFactory);
+        color = this.color[1]; createBurst(this.starCount / 2, starFactory);
+      }
+    }
+
+    if (this.pistil) {
+      const inner = new Shell({ spreadSize: this.spreadSize * 0.5, starLife: this.starLife * 0.6, starLifeVariation: this.starLifeVariation, starDensity: 1.4, color: this.pistilColor, glitter: 'light', glitterColor: this.pistilColor === COLORS.Gold ? COLORS.Gold : COLORS.White });
+      inner.burst(x, y);
+    }
+    if (this.streamers) {
+      const inner = new Shell({ spreadSize: this.spreadSize * 0.9, starLife: this.starLife * 0.8, starLifeVariation: this.starLifeVariation, starCount: Math.floor(Math.max(6, this.spreadSize / 45)), color: COLORS.White, glitter: 'streamer' });
+      inner.burst(x, y);
+    }
+    BurstFlash.add(x, y, this.spreadSize / 4);
+    if (this.comet) {
+      const maxDiff = 2;
+      const sizeDiff = Math.min(maxDiff, state.config.size - this.shellSize);
+      const soundScale = (1 - sizeDiff / maxDiff) * 0.3 + 0.7;
+      sound.play('burst', soundScale);
+    }
+  }
+}
+
+// ===== 音效管理器（InnerAudioContext 池，对应 lift/burst/burstSmall/crackle/crackleSmall）=====
+const sound = {
+  enabled: true,
+  pools: {
+    lift: { vol: 1.0, files: ['audio/lift1.mp3', 'audio/lift2.mp3', 'audio/lift3.mp3'], pool: [] },
+    burst: { vol: 1.0, files: ['audio/burst1.mp3', 'audio/burst2.mp3'], pool: [] },
+    burstSmall: { vol: 0.25, files: ['audio/burst-sm-1.mp3', 'audio/burst-sm-2.mp3'], pool: [] },
+    crackle: { vol: 0.2, files: ['audio/crackle1.mp3'], pool: [] },
+    crackleSmall: { vol: 0.3, files: ['audio/crackle-sm-1.mp3'], pool: [] }
+  },
+  _lastSmall: 0,
+  init() {
+    for (const k in this.pools) {
+      const p = this.pools[k];
+      p.idx = 0;
+      for (let i = 0; i < 4; i++) {
+        const a = wx.createInnerAudioContext();
+        a.src = p.files[i % p.files.length];
+        a.obeyMuteSwitch = false;
+        p.pool.push(a);
+      }
+    }
+  },
+  play(type, scale = 1) {
+    if (!this.enabled) return;
+    scale = clamp(scale, 0, 1);
+    if (scale <= 0) return;
+    if (type === 'burstSmall') {
+      const now = Date.now();
+      if (now - this._lastSmall < 20) return;
+      this._lastSmall = now;
+    }
+    const p = this.pools[type];
+    if (!p) return;
+    const a = p.pool[p.idx];
+    p.idx = (p.idx + 1) % p.pool.length;
+    try {
+      a.stop();
+      a.volume = p.vol * scale;
+      a.seek(0);
+      a.play();
+    } catch (e) {}
+  },
+  toggle() { this.enabled = !this.enabled; },
+  resume() { this.enabled = true; },
+  pause() { this.enabled = false; }
+};
+
+// ===== 主状态（对应 store）=====
+const state = {
+  paused: false,
+  menuOpen: false,
+  config: {
+    shell: 'Random',
+    size: 2,
+    quality: QUALITY_NORMAL,
+    skyLighting: String(SKY_LIGHT_NORMAL),
+    scaleFactor: 0.9,
+    autoLaunch: true,
+    finale: true,
+    longExposure: false,
+    hideControls: false,
+    fullscreen: false
+  },
+  stageW: 0, stageH: 0,
+  quality: QUALITY_NORMAL,
+  isLowQuality: false,
+  isHighQuality: false,
+  currentFrame: 0,
+  autoLaunchTime: 0,
+  finaleCount: 32,
+  currentFinaleCount: 0,
+  isFirstSeq: true,
+  // 照亮天空
+  currentSky: { r: 0, g: 0, b: 0 },
+  targetSky: { r: 0, g: 0, b: 0 }
+};
+
+// 颜色 → RGB
+const COLOR_TUPLES = {};
+COLOR_CODES.forEach(hex => {
+  const n = parseInt(hex.slice(1), 16);
+  COLOR_TUPLES[hex] = { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+});
+COLOR_TUPLES[INVISIBLE] = { r: 0, g: 0, b: 0 };
+
+// ===== 燃放序列 =====
+function seqRandomShell() { const s = new Shell(makeShellConfig(state.config.shell, state.config.size)); s.launch(Math.random(), Math.random()); return 900; }
+function seqTwoRandom() { for (let i = 0; i < 2; i++) { const s = new Shell(makeShellConfig(state.config.shell, state.config.size)); s.launch(Math.random(), Math.random()); } return 700; }
+function seqTriple() { for (let i = 0; i < 3; i++) { const s = new Shell(makeShellConfig(state.config.shell, state.config.size)); s.launch(Math.random(), Math.random()); } return 700; }
+function seqPyramid() {
+  const count = 5 + randInt(4);
+  for (let i = 0; i < count; i++) {
+    const s = new Shell(makeShellConfig(state.config.shell, state.config.size));
+    const delay = i * 120;
+    setTimeout(() => s.launch(i / (count - 1), 0.4), delay);
+  }
+  return count * 120 + 1200;
+}
+function seqSmallBarrage() {
+  const count = 8 + randInt(8);
+  for (let i = 0; i < count; i++) {
+    const s = new Shell(makeShellConfig(state.config.shell, Math.max(0, state.config.size - 1)));
+    setTimeout(() => s.launch(Math.random(), Math.random()), i * 60);
+  }
+  return count * 60 + 1200;
+}
+function startSequence() {
+  if (state.isFirstSeq) {
+    state.isFirstSeq = false;
+    const s = new Shell(crysanthemumShell(state.config.size));
+    s.launch(0.5, 0.5);
+    return 2400;
+  }
+  if (state.config.finale) {
+    const s = new Shell(makeShellConfig(state.config.shell, state.config.size));
+    s.launch(Math.random(), Math.random());
+    if (state.currentFinaleCount < state.finaleCount) { state.currentFinaleCount++; return 170; }
+    state.currentFinaleCount = 0; return 6000;
+  }
+  const r = Math.random();
+  if (r < 0.08) return seqSmallBarrage();
+  if (r < 0.1) return seqPyramid();
+  if (r < 0.6) return seqRandomShell();
+  if (r < 0.8) return seqTwoRandom();
+  return seqTriple();
+}
+
+// 根据配置造一个 shell（Random 时随机）
+function makeShellConfig(name, size) {
+  if (name === 'Random') {
+    const fn = Math.random() < 0.5 ? crysanthemumShell : randomFastShell();
+    return fn(size);
+  }
+  return shellTypes[name](size);
+}
+
+// ===== Page =====
 Page({
   data: {
-    greeting: '新年快乐',     // 画布中央文字，可改成任意文案
-    muted: false,
-    showPanel: false,         // 轨迹控制面板
-    trajMode: 'random',       // random | fan | spiral | heart
-    angle: 8,                 // 发射角度(度)
-    power: 11,                // 发射力度(初速)
-    gravity: 8,               // 重力(*0.01)
-    spread: 34,               // 炸开大小(/10)
-    textInput: '新年快乐'     // 轰出文字内容
+    showPanel: false,
+    soundOn: true,
+    paused: false,
+    hideControls: false,
+    // 设置项数据
+    shellIndex: 0,
+    sizeIndex: 2,
+    qualityIndex: 1,
+    skyIndex: 2,
+    scaleIndex: 3,
+    shellOptions: SHELL_NAMES,
+    sizeOptions: SIZE_NAMES,
+    qualityOptions: ['低', '正常', '高'],
+    skyOptions: ['不', '暗', '正常'],
+    scaleOptions: SCALE_OPTIONS.map(v => (v * 100) + '%'),
+    autoLaunch: true,
+    finale: true,
+    longExposure: false,
+    fullscreen: false
   },
 
-  onLoad(options) {
-    this.autoText = options && options.text ? options.text : '';
+  onLoad() {
+    // 读取本地设置
+    try {
+      const saved = wx.getStorageSync('fw_config');
+      if (saved) Object.assign(state.config, saved);
+    } catch (e) {}
+    this.syncConfigToData();
   },
 
   onReady() {
-    this.muted = false;
-    this.textCache = {};      // 文字采样缓存
-    this.fanPhase = 0;        // 扇形扫射相位
-    this.flashes = [];         // 爆心径向闪光队列
-    // 同步面板参数
-    this.angleDeg = this.data.angle;
-    this.power = this.data.power;
-    this.gravity = this.data.gravity * 0.01;
-    this.spread = this.data.spread / 10;
-    this.trajMode = this.data.trajMode;
-
     this.initAudio();
     this.initCanvas();
+    this.applyConfig();
   },
 
   onUnload() {
     this.running = false;
-    this.destroyAudio();
+    if (this.rafId) clearTimeout(this.rafId);
   },
 
-  onHide() {
-    this.running = false;
-  },
+  initAudio() { sound.init(); },
 
-  onShow() {
-    if (this.canvas && !this.running) {
-      this.running = true;
-      this.canvas.requestAnimationFrame((t) => this.loop(t));
-    }
-  },
-
-  // ===== 音效：直接复用 fangyanhua.top 同源的真实烟花录音（NianBroken/Firework_Simulator, Apache-2.0）=====
-  // lift = 升空声；burst = 爆炸声（大/小）；crackle = 炸后噼啪余响。每类建音频池做重叠播放。
-  initAudio() {
-    if (this.launchPool) return;
-    const mk = (src) => {
-      const a = wx.createInnerAudioContext();
-      a.src = src;                 // 相对 miniprogramRoot 的代码包内音频
-      a.obeyMuteSwitch = false;    // 音效不受静音键影响（玩具类小程序惯例）
-      a.volume = 0.85;
-      a.onError((e) => console.warn('audio error', src, e));
-      return a;
-    };
-    const liftSrc = ['audio/lift1.mp3', 'audio/lift2.mp3', 'audio/lift3.mp3'];
-    const burstSrc = ['audio/burst1.mp3', 'audio/burst2.mp3', 'audio/burst-sm-1.mp3', 'audio/burst-sm-2.mp3'];
-    const crackleSrc = ['audio/crackle1.mp3', 'audio/crackle-sm-1.mp3'];
-    this.launchPool = liftSrc.map(mk);     // 升空「咻」火箭窜天声
-    this.burstPool = burstSrc.map(mk);     // 爆炸「砰」
-    this.cracklePool = crackleSrc.map(mk); // 炸后「噼啪」余响
-    this.launchIdx = 0;
-    this.boomIdx = 0;
-    this.crackleIdx = 0;
-    this.lastLaunch = 0;
-    this.lastBoom = 0;
-  },
-
-  destroyAudio() {
-    ['launchPool', 'boomPool', 'cracklePool'].forEach((key) => {
-      if (this[key]) {
-        this[key].forEach((a) => { try { a.destroy(); } catch (e) {} });
-        this[key] = null;
-      }
+  syncConfigToData() {
+    const c = state.config;
+    this.setData({
+      shellIndex: Math.max(0, SHELL_NAMES.indexOf(c.shell)),
+      sizeIndex: clamp(parseInt(c.size), 0, 5),
+      qualityIndex: parseInt(c.quality) - 1,
+      skyIndex: parseInt(c.skyLighting),
+      scaleIndex: Math.max(0, SCALE_OPTIONS.indexOf(parseFloat(c.scaleFactor))),
+      autoLaunch: c.autoLaunch,
+      finale: c.finale,
+      longExposure: c.longExposure,
+      hideControls: c.hideControls,
+      fullscreen: c.fullscreen
     });
-  },
-
-  playLaunch() {
-    if (this.muted || !this.launchPool) return;
-    const now = Date.now();
-    if (now - this.lastLaunch < 120) return; // 节流
-    this.lastLaunch = now;
-    // 随机选一种升空声，更接近真实每次略有不同的听感
-    const i = Math.floor(Math.random() * this.launchPool.length);
-    const a = this.launchPool[i];
-    try { a.stop(); a.seek(0); a.play(); } catch (e) {}
-  },
-
-  playBoom() {
-    if (this.muted || !this.burstPool) return;
-    const now = Date.now();
-    if (now - this.lastBoom < 90) return; // 节流，避免一帧多爆糊成一片
-    this.lastBoom = now;
-    // 随机选一种爆炸声（大/小）
-    const a = this.burstPool[this.boomIdx];
-    this.boomIdx = (this.boomIdx + 1) % this.burstPool.length;
-    try { a.stop(); a.seek(0); a.play(); } catch (e) {}
-    // 炸后约 120ms 叠一层 crackle 余响，对标原版死亡/噼啪逻辑
-    try {
-      const c = this.cracklePool[this.crackleIdx];
-      this.crackleIdx = (this.crackleIdx + 1) % this.cracklePool.length;
-      setTimeout(() => { try { c.stop(); c.seek(0); c.play(); } catch (e) {} }, 120);
-    } catch (e) {}
-  },
-
-  onToggleMute() {
-    this.muted = !this.muted;
-    this.setData({ muted: this.muted });
-  },
-
-  // ===== 控制面板交互 =====
-  onTogglePanel() {
-    this.setData({ showPanel: !this.data.showPanel });
-  },
-
-  noop() {},
-
-  setTraj(e) {
-    const m = e.currentTarget.dataset.m;
-    this.trajMode = m;
-    this.setData({ trajMode: m });
-  },
-
-  onAngle(e) { this.angleDeg = e.detail.value; this.setData({ angle: e.detail.value }); },
-  onPower(e) { this.power = e.detail.value; this.setData({ power: e.detail.value }); },
-  onGravity(e) { this.gravity = e.detail.value * 0.01; this.setData({ gravity: e.detail.value }); },
-  onSpread(e) { this.spread = e.detail.value / 10; this.setData({ spread: e.detail.value }); },
-
-  onTextInput(e) {
-    this.setData({ textInput: e.detail.value });
-  },
-
-  // 「轰出文字」：发射一枚直上火箭，到中心后炸成文字
-  onBlastText() {
-    if (!this.W) return;
-    const text = (this.data.textInput || '').trim() || '新年快乐';
-    this.setData({ textInput: text });
-    this.rockets.push({
-      x: this.W / 2,
-      y: this.H + 8,
-      vx: 0,
-      vy: -this.power,
-      targetY: this.H * 0.42,
-      color: pick(COLORS),
-      text: text
-    });
-    this.playLaunch();
   },
 
   initCanvas() {
-    wx.createSelectorQuery()
-      .select('#fw')
-      .fields({ node: true, size: true })
-      .exec((res) => {
-        const info = res && res[0];
-        if (!info || !info.node) {
-          console.error('未获取到 canvas 节点');
-          return;
+    const q = wx.createSelectorQuery();
+    q.select('#fw').fields({ node: true, size: true }).exec((res) => {
+      if (!res || !res[0]) return;
+      const canvas = res[0].node;
+      const ctx = canvas.getContext('2d');
+      const dpr = (wx.getWindowInfo ? wx.getWindowInfo().pixelRatio : wx.getSystemInfoSync().pixelRatio) || 2;
+      this.canvas = canvas; this.ctx = ctx; this.dpr = dpr;
+      canvas.width = res[0].width * dpr;
+      canvas.height = res[0].height * dpr;
+      this.cssW = res[0].width; this.cssH = res[0].height;
+      this.applyConfig();
+      console.log('[fw] canvas css=' + this.cssW + 'x' + this.cssH + ' dpr=' + dpr +
+        ' pixel=' + canvas.width + 'x' + canvas.height +
+        ' stage=' + Math.round(state.stageW) + 'x' + Math.round(state.stageH));
+      this.running = true;
+      this.lastTime = Date.now();
+      const loop = () => {
+        if (!this.running) return;
+        const now = Date.now();
+        let dt = now - this.lastTime;
+        this.lastTime = now;
+        if (dt > 50) dt = 50;
+        try {
+          this.frame(dt);
+        } catch (e) {
+          // 单帧异常不应中断整条动画循环
+          console.error('[fw] frame error', e);
         }
-        const canvas = info.node;
-        const sys = wx.getWindowInfo ? wx.getWindowInfo() : wx.getSystemInfoSync();
-        const dpr = sys.pixelRatio || 2;
-        const W = info.width;
-        const H = info.height;
-
-        canvas.width = W * dpr;
-        canvas.height = H * dpr;
-        const ctx = canvas.getContext('2d');
-        ctx.scale(dpr, dpr);
-
-        this.canvas = canvas;
-        this.ctx = ctx;
-        this.W = W;
-        this.H = H;
-        this.rockets = [];
-        this.particles = [];
-        this.textParticles = [];
-        this.lastAuto = 0;
-        this.running = true;
-
-        // 首屏先来两发，避免开场空屏
-        this.launch(W * 0.3, H * 0.28);
-        this.launch(W * 0.7, H * 0.22);
-
-        this.loop(0);
-
-        // 支持 query.text 自动轰出文字（用于自动化/扫码直达演示）
-        if (this.autoText) {
-          this.data.textInput = this.autoText;
-          this.onBlastText();
+        // 用 setTimeout 自调度，兼容模拟器（部分基础库/模拟器下 canvas.requestAnimationFrame 不会持续触发）
+        if (state.currentFrame % 100 === 0) {
+          let _n = 0;
+          COLOR_CODES.forEach(c => { _n += Star.active[c].length; });
+          let _sp = 0;
+          COLOR_CODES.forEach(c => { _sp += Spark.active[c].length; });
+          console.log('[fw] frame=' + state.currentFrame + ' stars=' + _n + ' sparks=' + _sp);
         }
-      });
-  },
-
-  onTap(e) {
-    if (!this.W) return;
-    const d = e.detail || {};
-    let x = d.x;
-    let y = d.y;
-    if ((x == null || y == null) && e.touches && e.touches[0]) {
-      x = e.touches[0].x;
-      y = e.touches[0].y;
-    }
-    if (x == null) x = this.W / 2;
-    if (y == null) y = this.H * 0.3;
-
-    // 点击处发射
-    this.launch(x, y);
-    // 追加两发随机，热闹些
-    this.launch(rand(this.W * 0.12, this.W * 0.88), rand(this.H * 0.12, this.H * 0.45));
-    this.launch(rand(this.W * 0.12, this.W * 0.88), rand(this.H * 0.12, this.H * 0.45));
-  },
-
-  // 生成引导路径（心形 / 螺旋），单位：屏幕像素
-  buildPath(mode, baseX) {
-    const W = this.W;
-    const H = this.H;
-    const pts = [];
-    if (mode === 'heart') {
-      const cx = baseX != null ? baseX : W / 2;
-      const baseY = H * 0.66;
-      const s = H * 0.016;
-      for (let t = 0; t <= Math.PI * 2 + 0.001; t += 0.06) {
-        const hx = 16 * Math.pow(Math.sin(t), 3);
-        const hy = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
-        pts.push({ x: cx + hx * s, y: baseY - hy * s });
-      }
-    } else if (mode === 'spiral') {
-      const cx = baseX != null ? baseX : W / 2;
-      const cy = H * 0.74;
-      for (let i = 0; i < 150; i++) {
-        const a = i * 0.32;
-        const r = 8 + i * 0.95;
-        pts.push({ x: cx + Math.cos(a) * r, y: cy - i * 2.6 });
-      }
-    }
-    return pts;
-  },
-
-  // 发射一枚火箭：从底部升到 targetY 后爆炸（或沿引导路径飞行后爆炸）
-  launch(x, targetY) {
-    if (!this.W) return;
-    const mode = this.trajMode;
-    const power = this.power;
-    const angle = this.angleDeg;
-
-    // 引导类轨迹：心形 / 螺旋
-    if (mode === 'heart' || mode === 'spiral') {
-      const baseX = x != null ? x : this.W / 2;
-      this.rockets.push({
-        guided: true,
-        path: this.buildPath(mode, baseX),
-        pathIdx: 0,
-        speed: 2.2,
-        x: baseX,
-        y: this.H + 8,
-        color: pick(COLORS)
-      });
-      this.playLaunch();
-      return;
-    }
-
-    // 物理类轨迹：随机 / 扇形
-    let vx;
-    if (mode === 'fan') {
-      // 在 -35°~35° 之间扫射
-      const a = Math.sin(this.fanPhase) * 35 * Math.PI / 180;
-      this.fanPhase += 0.45;
-      vx = Math.sin(a) * power * 0.13;
-    } else {
-      vx = rand(-0.5, 0.5) + Math.sin(angle * Math.PI / 180) * power * 0.10;
-    }
-
-    this.rockets.push({
-      x: x != null ? x : rand(this.W * 0.2, this.W * 0.8),
-      y: this.H + 8,
-      vx: vx,
-      vy: -power,
-      targetY: targetY != null ? targetY : rand(this.H * 0.15, this.H * 0.45),
-      color: pick(COLORS)
+        this.rafId = setTimeout(loop, 16);
+      };
+      this.rafId = setTimeout(loop, 16);
     });
-    // 升空「咻」声
-    this.playLaunch();
   },
 
-  // 在 (x,y) 产生一圈爆炸粒子
-  explode(x, y, color) {
-    const count = 70 + ((Math.random() * 40) | 0);
-    const speed = this.spread * rand(0.7, 1.0);
-    for (let i = 0; i < count; i++) {
-      const a = (Math.PI * 2 * i) / count + rand(-0.05, 0.05);
-      const s = speed * rand(0.35, 1);
-      this.particles.push({
-        x, y, px: x, py: y,
-        vx: Math.cos(a) * s,
-        vy: Math.sin(a) * s,
-        color: Math.random() < 0.15 ? '#ffffff' : color,
-        alpha: 1,
-        decay: rand(0.008, 0.016),
-        size: rand(1.2, 2.4)
-      });
-    }
-    // 中心闪光
-    for (let i = 0; i < 14; i++) {
-      const a = rand(0, Math.PI * 2);
-      const s = rand(0.4, 1.2);
-      this.particles.push({
-        x, y, px: x, py: y,
-        vx: Math.cos(a) * s,
-        vy: Math.sin(a) * s,
-        color: '#fff6cc',
-        alpha: 1,
-        decay: rand(0.02, 0.04),
-        size: rand(1, 2)
-      });
-    }
-    // 控制粒子总量，防止低端机卡顿
-    const MAX = 1400;
-    if (this.particles.length > MAX) {
-      this.particles.splice(0, this.particles.length - MAX);
-    }
-    // 爆心白→橙径向闪光（对齐 fangyanhua 的 BurstFlash）
-    this.flashes.push({ x, y, r: Math.max(this.W, this.H) * 0.16, life: 1 });
-    // 爆炸「砰 + 噼啪」音效
-    this.playBoom();
+  applyConfig() {
+    if (!this.ctx) return;
+    const c = state.config;
+    state.quality = parseInt(c.quality);
+    state.isLowQuality = state.quality === QUALITY_LOW;
+    state.isHighQuality = state.quality === QUALITY_HIGH;
+    const sf = parseFloat(c.scaleFactor) || 0.9;
+    state.stageW = this.cssW / sf;
+    state.stageH = this.cssH / sf;
+    this.ctx.setTransform(this.dpr * sf, 0, 0, this.dpr * sf, 0, 0);
+    this.setData({ hideControls: c.hideControls || c.fullscreen });
   },
 
-  // 把文字采样成屏幕上的目标点（离屏 canvas 渲染 + 像素采样）
-  sampleText(text) {
-    if (this.textCache[text]) return this.textCache[text];
-    const offW = Math.max(80, Math.ceil(text.length * 50) + 40);
-    const offH = 80;
-    const off = wx.createOffscreenCanvas({ type: '2d', width: offW, height: offH });
-    if (!off || !off.getContext) {
-      console.error('createOffscreenCanvas 不可用', off);
-      return { pts: [], offW, offH };
-    }
-    const octx = off.getContext('2d');
-    octx.clearRect(0, 0, offW, offH);
-    octx.fillStyle = '#ffffff';
-    octx.font = 'bold 44px sans-serif';
-    octx.textAlign = 'center';
-    octx.textBaseline = 'middle';
-    octx.fillText(text, offW / 2, offH / 2);
-
-    const img = octx.getImageData(0, 0, offW, offH);
-    const data = img && img.data;
-    const pts = [];
-    const step = 3;
-    for (let y = 0; y < offH; y += step) {
-      for (let x = 0; x < offW; x += step) {
-        const alpha = data[(y * offW + x) * 4 + 3];
-        if (alpha > 128) pts.push({ x, y });
-      }
-    }
-    // 点过多则随机抽稀，控制性能
-    let sampled = pts;
-    if (pts.length > 700) {
-      sampled = [];
-      const keep = 700 / pts.length;
-      for (let i = 0; i < pts.length; i++) {
-        if (Math.random() < keep) sampled.push(pts[i]);
-      }
-    }
-    const result = { pts: sampled, offW, offH };
-    this.textCache[text] = result;
-    return result;
-  },
-
-  // 烟花轰出文字：粒子从爆心飞向文字目标点并定格成字
-  explodeText(cx, cy, text, color) {
-    const { pts, offW, offH } = this.sampleText(text);
-    const W = this.W;
-    const H = this.H;
-    const scale = Math.min((W * 0.82) / offW, (H * 0.34) / offH, 2.2);
-    const centerX = W / 2;
-    const centerY = H * 0.42;
-
-    for (let i = 0; i < pts.length; i++) {
-      const p = pts[i];
-      const tx = centerX + (p.x - offW / 2) * scale;
-      const ty = centerY + (p.y - offH / 2) * scale;
-      this.textParticles.push({
-        x: cx + rand(-30, 30),
-        y: cy + rand(-30, 30),
-        tx,
-        ty,
-        alpha: 1,
-        decay: rand(0.004, 0.008),
-        hold: rand(45, 90),
-        color: Math.random() < 0.2 ? '#ffffff' : (Math.random() < 0.5 ? color : pick(COLORS)),
-        size: rand(1.4, 2.6)
-      });
-    }
-    // 爆心闪光
-    for (let i = 0; i < 20; i++) {
-      const a = rand(0, Math.PI * 2);
-      const s = rand(0.6, 1.8);
-      this.particles.push({
-        x: cx,
-        y: cy,
-        vx: Math.cos(a) * s,
-        vy: Math.sin(a) * s,
-        color: '#fff6cc',
-        alpha: 1,
-        decay: rand(0.02, 0.05),
-        size: rand(1, 2.4)
-      });
-    }
-    this.playBoom();
-  },
-
-  // 画布中央发光节日文字（随烟花轻微呼吸）
-  drawGreeting() {
+  // ===== 每帧 =====
+  frame(dt) {
     const ctx = this.ctx;
-    const text = this.data.greeting;
-    if (!text) return;
-    const W = this.W;
-    const H = this.H;
-    const pulse = 0.80 + 0.12 * Math.sin(Date.now() / 620);
-    ctx.save();
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = 'bold 30px sans-serif';
-    ctx.shadowColor = 'rgba(255,210,120,0.95)';
-    ctx.shadowBlur = 26;
-    ctx.fillStyle = 'rgba(255,243,205,' + pulse.toFixed(3) + ')';
-    ctx.fillText(text, W / 2, H * 0.42);
-    ctx.restore();
+    if (!ctx) return;
+    state.currentFrame++;
+    const speed = 1; // simSpeed=1
+
+    if (!state.paused) {
+      // 自动燃放
+      if (state.config.autoLaunch) {
+        state.autoLaunchTime -= dt;
+        if (state.autoLaunchTime <= 0) {
+          state.autoLaunchTime = startSequence() * 1.25;
+        }
+      }
+      this.updatePhysics(dt);
+    }
+    this.render();
   },
 
-  loop(ts) {
-    if (!this.running) return;
-    const ctx = this.ctx;
-    const W = this.W;
-    const H = this.H;
+  updatePhysics(dt) {
+    const tick = dt / 16.67;
+    const gAcc = GRAVITY / 60 * tick;
+    const starDrag = Math.pow(Star.airDrag, tick);
+    const starDragHeavy = Math.pow(Star.airDragHeavy, tick);
+    const sparkDrag = Math.pow(Spark.airDrag, tick);
 
-    // 半透明黑覆盖 -> 形成拖尾（纯黑，对齐 fangyanhua 的 trails 层擦除系数）
+    COLOR_CODES_W_INVIS.forEach(color => {
+      const stars = Star.active[color];
+      for (let i = stars.length - 1; i >= 0; i--) {
+        const star = stars[i];
+        if (star.updateFrame === state.currentFrame) continue;
+        star.updateFrame = state.currentFrame;
+        star.life -= dt;
+        if (star.life <= 0) {
+          stars.splice(i, 1);
+          Star.returnInstance(star);
+          continue;
+        }
+        const burnRate = Math.pow(star.life / star.fullLife, 0.5);
+        const burnRateInverse = 1 - burnRate;
+        star.prevX = star.x; star.prevY = star.y;
+        star.x += star.speedX * tick;
+        star.y += star.speedY * tick;
+        if (!star.pureRise) {
+          if (!star.heavy) { star.speedX *= starDrag; star.speedY *= starDrag; }
+          else { star.speedX *= starDragHeavy; star.speedY *= starDragHeavy; }
+          if (!star.noGravity) star.speedY += gAcc;
+        }
+        if (star.spinRadius) {
+          star.spinAngle += star.spinSpeed * tick;
+          star.x += Math.sin(star.spinAngle) * star.spinRadius * tick;
+          star.y += Math.cos(star.spinAngle) * star.spinRadius * tick;
+        }
+        if (star.sparkFreq) {
+          star.sparkTimer -= dt;
+          while (star.sparkTimer < 0) {
+            star.sparkTimer += star.sparkFreq * 0.75 + star.sparkFreq * burnRateInverse * 4;
+            Spark.add(star.x, star.y, star.sparkColor, Math.random() * PI_2, Math.random() * star.sparkSpeed * burnRate, star.sparkLife * 0.8 + Math.random() * star.sparkLifeVariation * star.sparkLife);
+          }
+        }
+        if (star.life < star.transitionTime) {
+          if (star.secondColor && !star.colorChanged) {
+            star.colorChanged = true;
+            star.color = star.secondColor;
+            stars.splice(i, 1);
+            Star.active[star.secondColor].push(star);
+            if (star.secondColor === INVISIBLE) star.sparkFreq = 0;
+          }
+          if (star.strobe) {
+            star.visible = Math.floor(star.life / star.strobeFreq) % 3 === 0;
+          }
+        }
+      }
+      const sparks = Spark.active[color];
+      for (let i = sparks.length - 1; i >= 0; i--) {
+        const spark = sparks[i];
+        spark.life -= dt;
+        if (spark.life <= 0) { sparks.splice(i, 1); Spark.returnInstance(spark); continue; }
+        spark.prevX = spark.x; spark.prevY = spark.y;
+        spark.x += spark.speedX * tick;
+        spark.y += spark.speedY * tick;
+        spark.speedX *= sparkDrag; spark.speedY *= sparkDrag;
+        spark.speedY += gAcc;
+      }
+    });
+  },
+
+  render() {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const W = state.stageW, H = state.stageH;
+    const sf = parseFloat(state.config.scaleFactor) || 0.9;
+
+    // 拖尾清屏：半透明黑覆盖（同时充当背景清屏，不填实色，才能保留长拖尾）
     ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.175)';
+    ctx.fillStyle = `rgba(0,0,0,${state.config.longExposure ? 0.0025 : 0.175})`;
     ctx.fillRect(0, 0, W, H);
 
-    // 叠加发光
+    // 照亮天空：在拖尾之上叠加一层随当前绽放颜色变化的微光（additive）
+    if (parseInt(state.config.skyLighting) !== SKY_LIGHT_NONE) {
+      let total = 0; const t = state.targetSky; t.r = 0; t.g = 0; t.b = 0;
+      COLOR_CODES.forEach(color => {
+        const tuple = COLOR_TUPLES[color];
+        const count = Star.active[color].length;
+        total += count;
+        t.r += tuple.r * count; t.g += tuple.g * count; t.b += tuple.b * count;
+      });
+      const maxStar = 500;
+      const intensity = Math.pow(Math.min(1, total / maxStar), 0.3);
+      const maxC = Math.max(1, t.r, t.g, t.b);
+      const maxSat = parseInt(state.config.skyLighting) * 15;
+      t.r = t.r / maxC * maxSat * intensity;
+      t.g = t.g / maxC * maxSat * intensity;
+      t.b = t.b / maxC * maxSat * intensity;
+      const c = state.currentSky;
+      c.r += (t.r - c.r) / 10; c.g += (t.g - c.g) / 10; c.b += (t.b - c.b) / 10;
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = `rgba(${c.r | 0},${c.g | 0},${c.b | 0},0.14)`;
+      ctx.fillRect(0, 0, W, H);
+      ctx.globalCompositeOperation = 'source-over';
+    }
+
+    // 爆心闪光（lighter 渐变，按 life 渐隐）
     ctx.globalCompositeOperation = 'lighter';
-
-    // 自动放烟花（约每秒一发）
-    if (!this.lastAuto || ts - this.lastAuto > 900) {
-      this.lastAuto = ts;
-      this.launch();
-    }
-
-    // 更新火箭
-    for (let i = this.rockets.length - 1; i >= 0; i--) {
-      const r = this.rockets[i];
-
-      if (r.guided) {
-        // 沿引导路径飞行，拖尾由覆盖层 + 火花共同形成
-        r.pathIdx += r.speed;
-        const idx = Math.min(Math.floor(r.pathIdx), r.path.length - 1);
-        r.x = r.path[idx].x;
-        r.y = r.path[idx].y;
-        // 沿途撒火花，让轨迹发亮
-        this.particles.push({
-          x: r.x, y: r.y,
-          vx: rand(-0.3, 0.3), vy: rand(-0.3, 0.3),
-          color: r.color, alpha: 0.9, decay: 0.05, size: 1.6
-        });
-        ctx.globalAlpha = 0.95;
-        ctx.fillStyle = r.color;
-        ctx.beginPath();
-        ctx.arc(r.x, r.y, 2.0, 0, Math.PI * 2);
-        ctx.fill();
-        if (idx >= r.path.length - 1) {
-          this.explode(r.x, r.y, r.color);
-          this.rockets.splice(i, 1);
-        }
-        continue;
-      }
-
-      // 物理火箭
-      r.x += r.vx;
-      r.y += r.vy;
-      r.vy += this.gravity;
-
-      ctx.globalAlpha = 0.9;
-      ctx.fillStyle = r.color;
-      ctx.beginPath();
-      ctx.arc(r.x, r.y, 1.8, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = 0.25;
-      ctx.beginPath();
-      ctx.arc(r.x, r.y + 4, 1.2, 0, Math.PI * 2);
-      ctx.fill();
-
-      if (r.y <= r.targetY || r.vy >= 0) {
-        if (r.text) {
-          this.explodeText(r.x, r.y, r.text, r.color);
-        } else {
-          this.explode(r.x, r.y, r.color);
-        }
-        this.rockets.splice(i, 1);
-      }
-    }
-
-    // 更新普通粒子
-    for (let i = this.particles.length - 1; i >= 0; i--) {
-      const p = this.particles[i];
-      p.px = p.x; p.py = p.y;
-      p.x += p.vx;
-      p.y += p.vy;
-      p.vx *= 0.985;
-      p.vy *= 0.985;
-      p.vy += this.gravity * 0.56;
-      p.alpha -= p.decay;
-      if (p.alpha <= 0) {
-        this.particles.splice(i, 1);
-        continue;
-      }
-      ctx.globalAlpha = Math.max(p.alpha, 0);
-      ctx.strokeStyle = p.color;
-      ctx.lineWidth = Math.max(p.size, 1.6);
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.moveTo(p.px, p.py);
-      ctx.lineTo(p.x, p.y);
-      ctx.stroke();
-    }
-
-    // 爆心径向闪光（lighter 层，对齐 fangyanhua 的 BurstFlash）
-    for (let i = this.flashes.length - 1; i >= 0; i--) {
-      const f = this.flashes[i];
-      f.life -= 0.06;
-      if (f.life <= 0) { this.flashes.splice(i, 1); continue; }
-      const rad = f.r * (1.12 - f.life * 0.32);
-      const g = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, rad);
-      g.addColorStop(0.0, 'rgba(255,255,255,' + (f.life * 0.9).toFixed(3) + ')');
-      g.addColorStop(0.125, 'rgba(255,160,20,' + (f.life * 0.25).toFixed(3) + ')');
-      g.addColorStop(0.32, 'rgba(255,140,20,' + (f.life * 0.12).toFixed(3) + ')');
+    for (let i = BurstFlash.active.length - 1; i >= 0; i--) {
+      const bf = BurstFlash.active[i];
+      const a = Math.max(0, bf.life);
+      const g = ctx.createRadialGradient(bf.x, bf.y, 0, bf.x, bf.y, bf.radius);
+      g.addColorStop(0.024, `rgba(255,255,255,${a})`);
+      g.addColorStop(0.125, `rgba(255,160,20,${0.2 * a})`);
+      g.addColorStop(0.32, `rgba(255,140,20,${0.11 * a})`);
       g.addColorStop(1, 'rgba(255,120,20,0)');
       ctx.fillStyle = g;
-      ctx.fillRect(f.x - rad, f.y - rad, rad * 2, rad * 2);
+      ctx.fillRect(bf.x - bf.radius, bf.y - bf.radius, bf.radius * 2, bf.radius * 2);
+      bf.life -= bf.decay;
+      if (bf.life <= 0) { BurstFlash.active.splice(i, 1); BurstFlash.returnInstance(bf); }
     }
-
-    // 更新文字粒子：先汇聚成字，定格后渐隐
-    for (let i = this.textParticles.length - 1; i >= 0; i--) {
-      const p = this.textParticles[i];
-      if (p.hold > 0) {
-        p.hold--;
-        p.x += (p.tx - p.x) * 0.14;
-        p.y += (p.ty - p.y) * 0.14;
-      } else {
-        p.alpha -= p.decay;
-        p.x += (p.tx - p.x) * 0.06;
-        p.y += (p.ty - p.y) * 0.06;
-      }
-      if (p.alpha <= 0) {
-        this.textParticles.splice(i, 1);
-        continue;
-      }
-      ctx.globalAlpha = Math.max(p.alpha, 0);
-      ctx.fillStyle = p.color;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
 
-    // 节日文字（盖在粒子之上，始终清晰）
-    this.drawGreeting();
+    // 粒子（lighter 混合，线段拖尾）
+    ctx.globalCompositeOperation = 'lighter';
+    // Stars
+    ctx.lineCap = state.isLowQuality ? 'square' : 'round';
+    COLOR_CODES.forEach(color => {
+      const stars = Star.active[color];
+      if (!stars.length) return;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = Star.drawWidth;
+      ctx.beginPath();
+      stars.forEach(star => {
+        if (star.visible) { ctx.moveTo(star.x, star.y); ctx.lineTo(star.prevX, star.prevY); }
+      });
+      ctx.stroke();
+    });
+    // 白色高光核
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    COLOR_CODES.forEach(color => {
+      Star.active[color].forEach(star => {
+        if (star.visible) { ctx.moveTo(star.x, star.y); ctx.lineTo(star.x - star.speedX * 1.6, star.y - star.speedY * 1.6); }
+      });
+    });
+    ctx.stroke();
+    // Sparks
+    ctx.lineWidth = Spark.drawWidth || 1;
+    COLOR_CODES.forEach(color => {
+      const sparks = Spark.active[color];
+      if (!sparks.length) return;
+      ctx.strokeStyle = color;
+      ctx.beginPath();
+      sparks.forEach(spark => { ctx.moveTo(spark.x, spark.y); ctx.lineTo(spark.prevX, spark.prevY); });
+      ctx.stroke();
+    });
 
-    this.canvas.requestAnimationFrame((t) => this.loop(t));
-  }
+    ctx.globalCompositeOperation = 'source-over';
+  },
+
+  // ===== 交互 =====
+  onTapCanvas(e) {
+    if (state.paused) return;
+    const t = e.touches ? e.touches[0] : e.detail;
+    const x = e.detail ? e.detail.x : (t ? t.x : 0);
+    const y = e.detail ? e.detail.y : (t ? t.y : 0);
+    const sf = parseFloat(state.config.scaleFactor) || 0.9;
+    const px = x / sf, py = y / sf;
+    const pos = px / state.stageW;
+    const lh = 1 - py / state.stageH;
+    const s = makeShell(state.config.shell, state.config.size);
+    s.launch(clamp(pos, 0, 1), clamp(lh, 0, 1));
+  },
+
+  onTogglePause() {
+    state.paused = !state.paused;
+    this.setData({ paused: state.paused });
+  },
+
+  onToggleSound() {
+    sound.toggle();
+    this.setData({ soundOn: sound.enabled });
+  },
+
+  onTogglePanel() { this.setData({ showPanel: !this.data.showPanel }); },
+  onClosePanel() { this.setData({ showPanel: false }); },
+
+  persist() {
+    try { wx.setStorageSync('fw_config', state.config); } catch (e) {}
+  },
+
+  onShellChange(e) {
+    state.config.shell = SHELL_NAMES[+e.detail.value];
+    this.setData({ shellIndex: +e.detail.value }); this.persist();
+  },
+  onSizeChange(e) {
+    state.config.size = +e.detail.value;
+    this.setData({ sizeIndex: +e.detail.value }); this.persist();
+  },
+  onQualityChange(e) {
+    state.config.quality = String(+e.detail.value + 1);
+    this.setData({ qualityIndex: +e.detail.value }); this.applyConfig(); this.persist();
+  },
+  onSkyChange(e) {
+    state.config.skyLighting = String(+e.detail.value);
+    this.setData({ skyIndex: +e.detail.value }); this.persist();
+  },
+  onScaleChange(e) {
+    state.config.scaleFactor = SCALE_OPTIONS[+e.detail.value];
+    this.setData({ scaleIndex: +e.detail.value }); this.applyConfig(); this.persist();
+  },
+  onAutoLaunch(e) {
+    state.config.autoLaunch = e.detail.value;
+    this.setData({ autoLaunch: e.detail.value }); this.persist();
+  },
+  onFinale(e) {
+    state.config.finale = e.detail.value;
+    this.setData({ finale: e.detail.value }); this.persist();
+  },
+  onLongExposure(e) {
+    state.config.longExposure = e.detail.value;
+    this.setData({ longExposure: e.detail.value }); this.persist();
+  },
+  onHideControls(e) {
+    state.config.hideControls = e.detail.value;
+    this.setData({ hideControls: e.detail.value }); this.applyConfig(); this.persist();
+  },
+  onFullscreen(e) {
+    state.config.fullscreen = e.detail.value;
+    this.setData({ fullscreen: e.detail.value, hideControls: state.config.hideControls || e.detail.value }); this.applyConfig(); this.persist();
+    if (e.detail.value && wx.setKeepScreenOn) wx.setKeepScreenOn({ keepScreenOn: true });
+  },
+  noop() {}
 });

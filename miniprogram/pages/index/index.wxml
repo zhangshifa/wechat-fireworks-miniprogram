@@ -1,54 +1,81 @@
-<view class="wrap">
-  <canvas type="2d" id="fw" class="fw" bindtap="onTap" disable-scroll="true"></canvas>
+<view class="container">
+  <canvas type="2d" id="fw" class="fw-canvas" bindtap="onTapCanvas"></canvas>
 
-  <view class="topbar">
-    <text class="title">🎆 放烟花</text>
-    <view class="gear" bindtap="onTogglePanel">⚙️</view>
-  </view>
-
-  <!-- 轨迹控制面板 -->
-  <view wx:if="{{showPanel}}" class="panel" catchtap="onTogglePanel">
-    <view class="panel-inner" catchtap="noop">
-      <view class="panel-title">轨迹设置</view>
-
-      <view class="row">
-        <text class="row-label">轨迹</text>
-        <view class="seg">
-          <view class="seg-item {{trajMode==='random'?'on':''}}" bindtap="setTraj" data-m="random">随机</view>
-          <view class="seg-item {{trajMode==='fan'?'on':''}}" bindtap="setTraj" data-m="fan">扇形</view>
-          <view class="seg-item {{trajMode==='spiral'?'on':''}}" bindtap="setTraj" data-m="spiral">螺旋</view>
-          <view class="seg-item {{trajMode==='heart'?'on':''}}" bindtap="setTraj" data-m="heart">心形</view>
-        </view>
-      </view>
-
-      <view class="row">
-        <text class="row-label">角度 {{angle}}°</text>
-        <slider class="sl" min="0" max="35" value="{{angle}}" block-size="18" bindchanging="onAngle" bindchange="onAngle"/>
-      </view>
-      <view class="row">
-        <text class="row-label">力度 {{power}}</text>
-        <slider class="sl" min="8" max="16" value="{{power}}" block-size="18" bindchanging="onPower" bindchange="onPower"/>
-      </view>
-      <view class="row">
-        <text class="row-label">重力 {{gravity}}</text>
-        <slider class="sl" min="3" max="15" value="{{gravity}}" block-size="18" bindchanging="onGravity" bindchange="onGravity"/>
-      </view>
-      <view class="row">
-        <text class="row-label">炸开 {{spread}}</text>
-        <slider class="sl" min="20" max="50" value="{{spread}}" block-size="18" bindchanging="onSpread" bindchange="onSpread"/>
-      </view>
-
-      <view class="panel-tip">心形 / 螺旋：火箭沿图形飞行后绽放</view>
+  <!-- 控制按钮：暂停 / 音效 / 设置 -->
+  <view class="controls" wx:if="{{!hideControls}}">
+    <view class="btn" bindtap="onTogglePause">
+      <text class="ico">{{paused ? '▶' : '❚❚'}}</text>
+    </view>
+    <view class="btn" bindtap="onToggleSound">
+      <text class="ico">{{soundOn ? '🔊' : '🔇'}}</text>
+    </view>
+    <view class="btn" bindtap="onTogglePanel">
+      <text class="ico">⚙</text>
     </view>
   </view>
 
-  <!-- 文字烟花 -->
-  <view class="textbar">
-    <input class="tinput" value="{{textInput}}" placeholder="输入文字(≤8)" maxlength="8" bindinput="onTextInput" confirm-type="done"/>
-    <view class="tbtn" bindtap="onBlastText">🎆 轰出文字</view>
+  <!-- 设置面板 -->
+  <view class="menu {{showPanel ? '' : 'hide'}}" catchtap="onClosePanel">
+    <view class="menu__inner" catchtap="noop">
+      <view class="close" bindtap="onClosePanel">✕</view>
+      <view class="menu__header">设置</view>
+      <view class="menu__subheader">若想了解更多信息 请点击任意标签</view>
+
+      <scroll-view scroll-y class="menu__form">
+        <view class="form-option">
+          <text class="label">烟花类型</text>
+          <picker class="picker" range="{{shellOptions}}" value="{{shellIndex}}" bindchange="onShellChange">
+            <view class="picker-text">{{shellOptions[shellIndex]}}</view>
+          </picker>
+        </view>
+        <view class="form-option">
+          <text class="label">烟花大小</text>
+          <picker class="picker" range="{{sizeOptions}}" value="{{sizeIndex}}" bindchange="onSizeChange">
+            <view class="picker-text">{{sizeOptions[sizeIndex]}}</view>
+          </picker>
+        </view>
+        <view class="form-option">
+          <text class="label">画质</text>
+          <picker class="picker" range="{{qualityOptions}}" value="{{qualityIndex}}" bindchange="onQualityChange">
+            <view class="picker-text">{{qualityOptions[qualityIndex]}}</view>
+          </picker>
+        </view>
+        <view class="form-option">
+          <text class="label">照亮天空</text>
+          <picker class="picker" range="{{skyOptions}}" value="{{skyIndex}}" bindchange="onSkyChange">
+            <view class="picker-text">{{skyOptions[skyIndex]}}</view>
+          </picker>
+        </view>
+        <view class="form-option">
+          <text class="label">缩放</text>
+          <picker class="picker" range="{{scaleOptions}}" value="{{scaleIndex}}" bindchange="onScaleChange">
+            <view class="picker-text">{{scaleOptions[scaleIndex]}}</view>
+          </picker>
+        </view>
+
+        <view class="form-option">
+          <text class="label">自动放烟花</text>
+          <switch checked="{{autoLaunch}}" bindchange="onAutoLaunch" color="#ffbf36" />
+        </view>
+        <view class="form-option">
+          <text class="label">同时放更多的烟花</text>
+          <switch checked="{{finale}}" bindchange="onFinale" color="#ffbf36" />
+        </view>
+        <view class="form-option">
+          <text class="label">隐藏控制按钮</text>
+          <switch checked="{{hideControls}}" bindchange="onHideControls" color="#ffbf36" />
+        </view>
+        <view class="form-option">
+          <text class="label">全屏</text>
+          <switch checked="{{fullscreen}}" bindchange="onFullscreen" color="#ffbf36" />
+        </view>
+        <view class="form-option">
+          <text class="label">保留烟花的火花</text>
+          <switch checked="{{longExposure}}" bindchange="onLongExposure" color="#ffbf36" />
+        </view>
+      </scroll-view>
+
+      <view class="credits">烟花模拟器 · 致敬 NianBroken/Firework_Simulator</view>
+    </view>
   </view>
-
-  <view class="mute" bindtap="onToggleMute">{{muted ? '🔇' : '🔊'}}</view>
-
-  <view class="hint">轻触放烟花 · 点「轰出文字」用烟花写字</view>
 </view>
