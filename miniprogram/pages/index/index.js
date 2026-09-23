@@ -59,28 +59,33 @@ Page({
     }
   },
 
-  // ===== 音效：代码包内两段音频，分别用音频池实现重叠播放 =====
+  // ===== 音效：直接复用 fangyanhua.top 同源的真实烟花录音（NianBroken/Firework_Simulator, Apache-2.0）=====
+  // lift = 升空声；burst = 爆炸声（大/小）；crackle = 炸后噼啪余响。每类建音频池做重叠播放。
   initAudio() {
     if (this.launchPool) return;
     const mk = (src) => {
       const a = wx.createInnerAudioContext();
       a.src = src;                 // 相对 miniprogramRoot 的代码包内音频
       a.obeyMuteSwitch = false;    // 音效不受静音键影响（玩具类小程序惯例）
-      a.volume = 0.6;
+      a.volume = 0.85;
       a.onError((e) => console.warn('audio error', src, e));
       return a;
     };
-    const N = 4; // 同时最多 4 个同段声音重叠
-    this.launchPool = Array.from({ length: N }, () => mk('audio/launch.wav')); // 升空「咻」
-    this.boomPool = Array.from({ length: N }, () => mk('audio/boom.wav'));     // 爆炸「砰+噼啪」
+    const liftSrc = ['audio/lift1.mp3', 'audio/lift2.mp3', 'audio/lift3.mp3'];
+    const burstSrc = ['audio/burst1.mp3', 'audio/burst2.mp3', 'audio/burst-sm-1.mp3', 'audio/burst-sm-2.mp3'];
+    const crackleSrc = ['audio/crackle1.mp3', 'audio/crackle-sm-1.mp3'];
+    this.launchPool = liftSrc.map(mk);     // 升空「咻」火箭窜天声
+    this.burstPool = burstSrc.map(mk);     // 爆炸「砰」
+    this.cracklePool = crackleSrc.map(mk); // 炸后「噼啪」余响
     this.launchIdx = 0;
     this.boomIdx = 0;
+    this.crackleIdx = 0;
     this.lastLaunch = 0;
     this.lastBoom = 0;
   },
 
   destroyAudio() {
-    ['launchPool', 'boomPool'].forEach((key) => {
+    ['launchPool', 'boomPool', 'cracklePool'].forEach((key) => {
       if (this[key]) {
         this[key].forEach((a) => { try { a.destroy(); } catch (e) {} });
         this[key] = null;
@@ -93,19 +98,27 @@ Page({
     const now = Date.now();
     if (now - this.lastLaunch < 120) return; // 节流
     this.lastLaunch = now;
-    const a = this.launchPool[this.launchIdx];
-    this.launchIdx = (this.launchIdx + 1) % this.launchPool.length;
+    // 随机选一种升空声，更接近真实每次略有不同的听感
+    const i = Math.floor(Math.random() * this.launchPool.length);
+    const a = this.launchPool[i];
     try { a.stop(); a.seek(0); a.play(); } catch (e) {}
   },
 
   playBoom() {
-    if (this.muted || !this.boomPool) return;
+    if (this.muted || !this.burstPool) return;
     const now = Date.now();
     if (now - this.lastBoom < 90) return; // 节流，避免一帧多爆糊成一片
     this.lastBoom = now;
-    const a = this.boomPool[this.boomIdx];
-    this.boomIdx = (this.boomIdx + 1) % this.boomPool.length;
+    // 随机选一种爆炸声（大/小）
+    const a = this.burstPool[this.boomIdx];
+    this.boomIdx = (this.boomIdx + 1) % this.burstPool.length;
     try { a.stop(); a.seek(0); a.play(); } catch (e) {}
+    // 炸后约 120ms 叠一层 crackle 余响，对标原版死亡/噼啪逻辑
+    try {
+      const c = this.cracklePool[this.crackleIdx];
+      this.crackleIdx = (this.crackleIdx + 1) % this.cracklePool.length;
+      setTimeout(() => { try { c.stop(); c.seek(0); c.play(); } catch (e) {} }, 120);
+    } catch (e) {}
   },
 
   onToggleMute() {
