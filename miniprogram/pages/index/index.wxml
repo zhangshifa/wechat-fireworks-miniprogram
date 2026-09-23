@@ -3,9 +3,52 @@
 
   <view class="topbar">
     <text class="title">🎆 放烟花</text>
+    <view class="gear" bindtap="onTogglePanel">⚙️</view>
+  </view>
+
+  <!-- 轨迹控制面板 -->
+  <view wx:if="{{showPanel}}" class="panel" catchtap="onTogglePanel">
+    <view class="panel-inner" catchtap="noop">
+      <view class="panel-title">轨迹设置</view>
+
+      <view class="row">
+        <text class="row-label">轨迹</text>
+        <view class="seg">
+          <view class="seg-item {{trajMode==='random'?'on':''}}" bindtap="setTraj" data-m="random">随机</view>
+          <view class="seg-item {{trajMode==='fan'?'on':''}}" bindtap="setTraj" data-m="fan">扇形</view>
+          <view class="seg-item {{trajMode==='spiral'?'on':''}}" bindtap="setTraj" data-m="spiral">螺旋</view>
+          <view class="seg-item {{trajMode==='heart'?'on':''}}" bindtap="setTraj" data-m="heart">心形</view>
+        </view>
+      </view>
+
+      <view class="row">
+        <text class="row-label">角度 {{angle}}°</text>
+        <slider class="sl" min="0" max="35" value="{{angle}}" block-size="18" bindchanging="onAngle" bindchange="onAngle"/>
+      </view>
+      <view class="row">
+        <text class="row-label">力度 {{power}}</text>
+        <slider class="sl" min="8" max="16" value="{{power}}" block-size="18" bindchanging="onPower" bindchange="onPower"/>
+      </view>
+      <view class="row">
+        <text class="row-label">重力 {{gravity}}</text>
+        <slider class="sl" min="3" max="15" value="{{gravity}}" block-size="18" bindchanging="onGravity" bindchange="onGravity"/>
+      </view>
+      <view class="row">
+        <text class="row-label">炸开 {{spread}}</text>
+        <slider class="sl" min="20" max="50" value="{{spread}}" block-size="18" bindchanging="onSpread" bindchange="onSpread"/>
+      </view>
+
+      <view class="panel-tip">心形 / 螺旋：火箭沿图形飞行后绽放</view>
+    </view>
+  </view>
+
+  <!-- 文字烟花 -->
+  <view class="textbar">
+    <input class="tinput" value="{{textInput}}" placeholder="输入文字(≤8)" maxlength="8" bindinput="onTextInput" confirm-type="done"/>
+    <view class="tbtn" bindtap="onBlastText">🎆 轰出文字</view>
   </view>
 
   <view class="mute" bindtap="onToggleMute">{{muted ? '🔇' : '🔊'}}</view>
 
-  <view class="hint">轻触屏幕，放一朵烟花 ✨</view>
+  <view class="hint">轻触放烟花 · 点「轰出文字」用烟花写字</view>
 </view>
