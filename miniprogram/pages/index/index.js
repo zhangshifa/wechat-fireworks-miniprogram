@@ -1,5 +1,6 @@
-// 放烟花 —— Canvas 2D 粒子动画
-// 升空火箭(rise) -> 抵达目标点爆炸(explode) -> 粒子受重力/阻力衰减，叠加拖尾发光
+// 放烟花 —— Canvas 2D 粒子动画 + 爆炸音效 + 节日文字
+// 升空火箭(rise) -> 抵达目标点爆炸(explode，同时播放 boom 音效) -> 粒子受重力/阻力衰减，叠加拖尾发光
+// 画布中央叠加一行发光节日文字（data.greeting 可改）
 
 const COLORS = [
   '#ff4d6d', '#ffd166', '#06d6a0', '#4cc9f0', '#b5179e',
@@ -10,14 +11,20 @@ const rand = (a, b) => a + Math.random() * (b - a);
 const pick = (arr) => arr[(Math.random() * arr.length) | 0];
 
 Page({
-  data: {},
+  data: {
+    greeting: '新年快乐', // 画布中央文字，可改成任意文案
+    muted: false
+  },
 
   onReady() {
+    this.muted = false;
+    this.initAudio();
     this.initCanvas();
   },
 
   onUnload() {
     this.running = false;
+    this.destroyAudio();
   },
 
   onHide() {
@@ -29,6 +36,50 @@ Page({
       this.running = true;
       this.canvas.requestAnimationFrame((t) => this.loop(t));
     }
+  },
+
+  // ===== 音效：代码包内音频，用音频池实现重叠播放 =====
+  initAudio() {
+    if (this.audioPool) return;
+    this.audioPool = [];
+    this.audioIdx = 0;
+    this.lastSound = 0;
+    const N = 5; // 同时最多 5 个爆炸声重叠
+    for (let i = 0; i < N; i++) {
+      const a = wx.createInnerAudioContext();
+      a.src = 'audio/boom.wav'; // 相对 miniprogramRoot 的代码包内音频
+      a.obeyMuteSwitch = false;  // 音效不受静音键影响（玩具类小程序惯例）
+      a.volume = 0.6;
+      a.onError((e) => console.warn('boom audio error', e));
+      this.audioPool.push(a);
+    }
+  },
+
+  destroyAudio() {
+    if (!this.audioPool) return;
+    this.audioPool.forEach((a) => {
+      try { a.destroy(); } catch (e) {}
+    });
+    this.audioPool = null;
+  },
+
+  playBoom() {
+    if (this.muted || !this.audioPool) return;
+    const now = Date.now();
+    if (now - this.lastSound < 90) return; // 节流，避免一帧多爆糊成一片
+    this.lastSound = now;
+    const a = this.audioPool[this.audioIdx];
+    this.audioIdx = (this.audioIdx + 1) % this.audioPool.length;
+    try {
+      a.stop();
+      a.seek(0);
+      a.play();
+    } catch (e) {}
+  },
+
+  onToggleMute() {
+    this.muted = !this.muted;
+    this.setData({ muted: this.muted });
   },
 
   initCanvas() {
@@ -139,6 +190,28 @@ Page({
     if (this.particles.length > MAX) {
       this.particles.splice(0, this.particles.length - MAX);
     }
+    // 爆炸音效
+    this.playBoom();
+  },
+
+  // 画布中央发光节日文字（随烟花轻微呼吸）
+  drawGreeting() {
+    const ctx = this.ctx;
+    const text = this.data.greeting;
+    if (!text) return;
+    const W = this.W;
+    const H = this.H;
+    const pulse = 0.80 + 0.12 * Math.sin(Date.now() / 620);
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = 'bold 30px sans-serif';
+    ctx.shadowColor = 'rgba(255,210,120,0.95)';
+    ctx.shadowBlur = 26;
+    ctx.fillStyle = 'rgba(255,243,205,' + pulse.toFixed(3) + ')';
+    ctx.fillText(text, W / 2, H * 0.42);
+    ctx.restore();
   },
 
   loop(ts) {
@@ -206,6 +279,9 @@ Page({
 
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
+
+    // 节日文字（盖在粒子之上，始终清晰）
+    this.drawGreeting();
 
     this.canvas.requestAnimationFrame((t) => this.loop(t));
   }

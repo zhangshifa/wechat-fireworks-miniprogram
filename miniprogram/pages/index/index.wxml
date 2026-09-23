@@ -1,4 +1,11 @@
 <view class="wrap">
   <canvas type="2d" id="fw" class="fw" bindtap="onTap" disable-scroll="true"></canvas>
+
+  <view class="topbar">
+    <text class="title">🎆 放烟花</text>
+  </view>
+
+  <view class="mute" bindtap="onToggleMute">{{muted ? '🔇' : '🔊'}}</view>
+
   <view class="hint">轻触屏幕，放一朵烟花 ✨</view>
 </view>
