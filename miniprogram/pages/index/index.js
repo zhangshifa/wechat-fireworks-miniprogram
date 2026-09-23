@@ -24,6 +24,10 @@ Page({
     textInput: '新年快乐'     // 轰出文字内容
   },
 
+  onLoad(options) {
+    this.autoText = options && options.text ? options.text : '';
+  },
+
   onReady() {
     this.muted = false;
     this.textCache = {};      // 文字采样缓存
@@ -184,6 +188,12 @@ Page({
         this.launch(W * 0.7, H * 0.22);
 
         this.loop(0);
+
+        // 支持 query.text 自动轰出文字（用于自动化/扫码直达演示）
+        if (this.autoText) {
+          this.data.textInput = this.autoText;
+          this.onBlastText();
+        }
       });
   },
 
@@ -326,6 +336,10 @@ Page({
     const offW = Math.max(80, Math.ceil(text.length * 50) + 40);
     const offH = 80;
     const off = wx.createOffscreenCanvas({ type: '2d', width: offW, height: offH });
+    if (!off || !off.getContext) {
+      console.error('createOffscreenCanvas 不可用', off);
+      return { pts: [], offW, offH };
+    }
     const octx = off.getContext('2d');
     octx.clearRect(0, 0, offW, offH);
     octx.fillStyle = '#ffffff';
@@ -334,7 +348,8 @@ Page({
     octx.textBaseline = 'middle';
     octx.fillText(text, offW / 2, offH / 2);
 
-    const data = octx.getImageData(0, 0, offW, offH).data;
+    const img = octx.getImageData(0, 0, offW, offH);
+    const data = img && img.data;
     const pts = [];
     const step = 3;
     for (let y = 0; y < offH; y += step) {
