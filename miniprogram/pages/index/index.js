@@ -1,5 +1,5 @@
-// 放烟花 —— Canvas 2D 粒子动画 + 爆炸音效 + 节日文字
-// 升空火箭(rise) -> 抵达目标点爆炸(explode，同时播放 boom 音效) -> 粒子受重力/阻力衰减，叠加拖尾发光
+// 放烟花 —— Canvas 2D 粒子动画 + 真实感烟花音效 + 节日文字
+// 升空火箭(rise) -> 播放「咻」升空声；抵达目标点爆炸(explode) -> 播放「砰+噼啪」并叠加发光粒子
 // 画布中央叠加一行发光节日文字（data.greeting 可改）
 
 const COLORS = [
@@ -38,43 +38,53 @@ Page({
     }
   },
 
-  // ===== 音效：代码包内音频，用音频池实现重叠播放 =====
+  // ===== 音效：代码包内两段音频，分别用音频池实现重叠播放 =====
   initAudio() {
-    if (this.audioPool) return;
-    this.audioPool = [];
-    this.audioIdx = 0;
-    this.lastSound = 0;
-    const N = 5; // 同时最多 5 个爆炸声重叠
-    for (let i = 0; i < N; i++) {
+    if (this.launchPool) return;
+    const mk = (src) => {
       const a = wx.createInnerAudioContext();
-      a.src = 'audio/boom.wav'; // 相对 miniprogramRoot 的代码包内音频
-      a.obeyMuteSwitch = false;  // 音效不受静音键影响（玩具类小程序惯例）
+      a.src = src;                 // 相对 miniprogramRoot 的代码包内音频
+      a.obeyMuteSwitch = false;    // 音效不受静音键影响（玩具类小程序惯例）
       a.volume = 0.6;
-      a.onError((e) => console.warn('boom audio error', e));
-      this.audioPool.push(a);
-    }
+      a.onError((e) => console.warn('audio error', src, e));
+      return a;
+    };
+    const N = 4; // 同时最多 4 个同段声音重叠
+    this.launchPool = Array.from({ length: N }, () => mk('audio/launch.wav')); // 升空「咻」
+    this.boomPool = Array.from({ length: N }, () => mk('audio/boom.wav'));     // 爆炸「砰+噼啪」
+    this.launchIdx = 0;
+    this.boomIdx = 0;
+    this.lastLaunch = 0;
+    this.lastBoom = 0;
   },
 
   destroyAudio() {
-    if (!this.audioPool) return;
-    this.audioPool.forEach((a) => {
-      try { a.destroy(); } catch (e) {}
+    ['launchPool', 'boomPool'].forEach((key) => {
+      if (this[key]) {
+        this[key].forEach((a) => { try { a.destroy(); } catch (e) {} });
+        this[key] = null;
+      }
     });
-    this.audioPool = null;
+  },
+
+  playLaunch() {
+    if (this.muted || !this.launchPool) return;
+    const now = Date.now();
+    if (now - this.lastLaunch < 120) return; // 节流
+    this.lastLaunch = now;
+    const a = this.launchPool[this.launchIdx];
+    this.launchIdx = (this.launchIdx + 1) % this.launchPool.length;
+    try { a.stop(); a.seek(0); a.play(); } catch (e) {}
   },
 
   playBoom() {
-    if (this.muted || !this.audioPool) return;
+    if (this.muted || !this.boomPool) return;
     const now = Date.now();
-    if (now - this.lastSound < 90) return; // 节流，避免一帧多爆糊成一片
-    this.lastSound = now;
-    const a = this.audioPool[this.audioIdx];
-    this.audioIdx = (this.audioIdx + 1) % this.audioPool.length;
-    try {
-      a.stop();
-      a.seek(0);
-      a.play();
-    } catch (e) {}
+    if (now - this.lastBoom < 90) return; // 节流，避免一帧多爆糊成一片
+    this.lastBoom = now;
+    const a = this.boomPool[this.boomIdx];
+    this.boomIdx = (this.boomIdx + 1) % this.boomPool.length;
+    try { a.stop(); a.seek(0); a.play(); } catch (e) {}
   },
 
   onToggleMute() {
@@ -150,6 +160,8 @@ Page({
       targetY: targetY != null ? targetY : rand(this.H * 0.15, this.H * 0.45),
       color: pick(COLORS)
     });
+    // 升空「咻」声
+    this.playLaunch();
   },
 
   // 在 (x,y) 产生一圈爆炸粒子
@@ -190,7 +202,7 @@ Page({
     if (this.particles.length > MAX) {
       this.particles.splice(0, this.particles.length - MAX);
     }
-    // 爆炸音效
+    // 爆炸「砰 + 噼啪」音效
     this.playBoom();
   },
 
